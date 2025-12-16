@@ -17,7 +17,7 @@ InitUI() {
 
     ; Крупный шрифт для подписи
     MyGui.SetFont("s16 Bold", "Segoe UI")
-    MyGui.Add("Text", "x0 y0 w260 Center", "Made by Gh0StCK`n    v0.7.0")
+    MyGui.Add("Text", "x0 y0 w260 Center", "Made by Gh0StCK`n    v0.7.1")
 
     ; Чуть меньший шрифт для настройки
     MyGui.SetFont("s10", "Segoe UI")

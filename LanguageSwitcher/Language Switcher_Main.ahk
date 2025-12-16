@@ -36,10 +36,10 @@ Convert(autoSelect := true) {
 
     A_Clipboard := ""
     Send "^c"
-    if !ClipWait(0.4) {
-        RestoreClipboard()
-        return
-    }
+	if !ClipWait(0.4) || (A_Clipboard = "") {
+		RestoreClipboard()
+		return
+	}
 
     sel  := A_Clipboard
     conv := ToggleLayout(sel)
@@ -60,8 +60,10 @@ Convert(autoSelect := true) {
 
 RestoreClipboard() {
     global ClipSaved
-    if (ClipSaved != "")
+    if (ClipSaved != "") {
         A_Clipboard := ClipSaved
+        ClipSaved := ""   ; сброс
+    }
 }
 
 SwitchLayout() {
@@ -78,17 +80,22 @@ ToggleLayout(str) {
 
 RuToEn(str) {
     ru := "ёйцукенгшщзхъфывапролджэячсмитьбю"
-        . "ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ"
-    en := "`~qwertyuiop[]asdfghjkl;'zxcvbnm,./"
-        . "QWERTYUIOP{}ASDFGHJKL:" . Chr(34) . "ZXCVBNM<>"
+        . "ЁЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ"
+
+    ; ВАЖНО: чтобы в строке реально был символ `, пишем его как ``
+    en := "``qwertyuiop[]asdfghjkl;'zxcvbnm,."
+        . "~QWERTYUIOP{}ASDFGHJKL:" . Chr(34) . "ZXCVBNM<>"
+
     return MapLayout(str, ru, en)
 }
 
 EnToRu(str) {
     ru := "ёйцукенгшщзхъфывапролджэячсмитьбю"
-        . "ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ"
-    en := "`~qwertyuiop[]asdfghjkl;'zxcvbnm,./"
-        . "QWERTYUIOP{}ASDFGHJKL:" . Chr(34) . "ZXCVBNM<>"
+        . "ЁЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ"
+
+    en := "``qwertyuiop[]asdfghjkl;'zxcvbnm,."
+        . "~QWERTYUIOP{}ASDFGHJKL:" . Chr(34) . "ZXCVBNM<>"
+
     return MapLayout(str, en, ru)
 }
 
@@ -96,7 +103,7 @@ MapLayout(str, from, to) {
     out := ""
     for _, ch in StrSplit(str, "")
     {
-        pos := InStr(from, ch)
+        pos := InStr(from, ch, true)  ; ВАЖНО: учитывать регистр
         if (pos > 0)
             out .= SubStr(to, pos, 1)
         else
