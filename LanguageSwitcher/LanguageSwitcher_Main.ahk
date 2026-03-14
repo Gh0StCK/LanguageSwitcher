@@ -1,5 +1,6 @@
 #Requires AutoHotkey v2.0+
 #SingleInstance Force
+#ClipboardTimeout 700
 #Include LanguageSwitcher_UI.ahk
 
 ; =========================
@@ -9,7 +10,6 @@ global LOG_ENABLED := false
 global LOG_FILE := A_ScriptDir "\LanguageSwitcher.log"
 
 NowStr() {
-    ; 2026-02-21 18:22:33.123
     return FormatTime(, "yyyy-MM-dd HH:mm:ss") "." SubStr(A_MSec, 1, 3)
 }
 
@@ -17,6 +17,7 @@ LogInit() {
     global LOG_ENABLED, LOG_FILE
     if !LOG_ENABLED
         return
+
     try FileDelete(LOG_FILE)
     try FileAppend("=== START " NowStr() " | PID=" DllCall("GetCurrentProcessId") " ===`n", LOG_FILE, "UTF-8")
 }
@@ -32,349 +33,558 @@ LogWin(prefix := "") {
     try Log(prefix "ActiveWinTitle=" WinGetTitle("A"))
 }
 
-LogInit()
-
-; =========================
-; НАСТРОЙКИ (дефолты)
-; =========================
-global gSwitchAfterBreak      := true   ; обычный Break/Pause (без модификаторов) -> линия
-global gSwitchAfterShiftBreak := true   ; Shift+Break/Pause -> выделение (перезапишется из INI в InitUI())
-global gSwitchAfterCtrlBreak  := true   ; Ctrl+Break -> слово (перезапишется из INI в InitUI())
-
-; защита от двойного срабатывания: CtrlBreak может триггерить и CtrlBreak, и Pause
-global gSkipNextPause := false
-
-; UI / INI
-global MyGui
-InitUI()
-
-Log("InitUI done | SwitchAfterShift=" (gSwitchAfterShiftBreak?1:0) " SwitchAfterCtrl=" (gSwitchAfterCtrlBreak?1:0))
-LogWin("AfterInitUI | ")
-
-; =========================
-; ХОТКЕИ
-; =========================
-
-; Если в системе реально приходит CtrlBreak — он будет работать тут
-^CtrlBreak:: {
-    global gSkipNextPause, gSwitchAfterCtrlBreak
-    Log("HOTKEY ^CtrlBreak fired | doSwitch=" (gSwitchAfterCtrlBreak?1:0))
-    LogWin("HOTKEY ^CtrlBreak | ")
-
-    gSkipNextPause := true
-    SetTimer (() => (gSkipNextPause := false)), -80
-
-    Convert("word", gSwitchAfterCtrlBreak)
-}
-
-; Универсальный ловец Pause/Break
-*Pause:: {
-    global gSkipNextPause, gSwitchAfterCtrlBreak, gSwitchAfterShiftBreak, gSwitchAfterBreak
-
-    Log("HOTKEY *Pause fired | skip=" (gSkipNextPause?1:0)
-        " Ctrl=" (GetKeyState("Ctrl","P")?1:0)
-        " Shift=" (GetKeyState("Shift","P")?1:0))
-    LogWin("HOTKEY *Pause | ")
-
-    if gSkipNextPause
-        return
-
-    if GetKeyState("Ctrl", "P")
-        Convert("word", gSwitchAfterCtrlBreak)
-    else if GetKeyState("Shift", "P")
-        Convert("selection", gSwitchAfterShiftBreak)
-    else
-        Convert("line", gSwitchAfterBreak)
-}
-
-; =========================
-; ОСНОВНАЯ ЛОГИКА
-; =========================
-
-Convert(mode := "selection", doSwitch := true) {
-    Critical
-    Log("Convert enter | mode=" mode " doSwitch=" (doSwitch?1:0))
-
-    if (mode = "word") {
-        ConvertWordBeforeCursor(doSwitch)
-        return
-    }
-
-    saved  := ClipboardAll()
-    marker := "#LS_MARKER_" A_TickCount "#"
-    A_Clipboard := marker
-
-    if (mode = "line") {
-        Log("Convert line: selecting from cursor to line start")
-        SendEvent "+{Home}"
-        Sleep 10
-        SendEvent "+{Home}"
-        Sleep 25
-    }
-
-    SendEvent "^c"
-    if !ClipWait(0.6) {
-        Log("Convert FAIL: ClipWait timeout")
-        RestoreClipboard(saved)
-        return
-    }
-
-    if (A_Clipboard = marker) {
-        Log("Convert exit: no selection (clipboard marker unchanged)")
-        RestoreClipboard(saved)
-        return
-    }
-
-    sel := A_Clipboard
-    Log("Convert copied len=" StrLen(sel))
-
-    if (sel = "") {
-        Log("Convert exit: selection empty")
-        RestoreClipboard(saved)
-        return
-    }
-
-    conv := ToggleLayout(sel)
-
-    if (conv = sel) {
-        Log("Convert: conv==sel (no changes)")
-        if (doSwitch) {
-            Log("Convert: doSwitch=1 -> SwitchLayout()")
-            SwitchLayout()
-        } else {
-            Log("Convert: doSwitch=0 -> skip SwitchLayout")
-        }
-        RestoreClipboard(saved)
-        return
-    }
-
-    A_Clipboard := conv
-    Sleep 20
-    SendEvent "^v"
-    Log("Convert pasted")
-
-    if (doSwitch) {
-        Log("Convert doSwitch=1 -> SwitchLayout()")
-        SwitchLayout()
-    } else {
-        Log("Convert doSwitch=0 -> skip SwitchLayout")
-    }
-
-    SetTimer RestoreClipboard.Bind(saved), -150
-}
-
-ConvertWordBeforeCursor(doSwitch := true) {
-    Critical
-    Log("ConvertWord enter | doSwitch=" (doSwitch?1:0))
-
-    saved  := ClipboardAll()
-    marker := "#LS_MARKER_" A_TickCount "#"
-    A_Clipboard := marker
-
-    ; берём всё слева от курсора до начала строки
-    SendEvent "+{Home}"
-    Sleep 10
-    SendEvent "+{Home}"
-    Sleep 25
-
-    SendEvent "^c"
-    if !ClipWait(0.6) {
-        Log("ConvertWord FAIL: ClipWait timeout (pre)")
-        RestoreClipboard(saved)
-        return
-    }
-    if (A_Clipboard = marker) {
-        Log("ConvertWord exit: marker unchanged (no selection?)")
-        RestoreClipboard(saved)
-        return
-    }
-
-    pre := A_Clipboard
-    origEnd := StrLen(pre)
-    Log("ConvertWord pre len=" origEnd)
-
-    if (origEnd = 0) {
-        SendEvent "{Right}"
-        Log("ConvertWord exit: pre empty")
-        RestoreClipboard(saved)
-        return
-    }
-
-    ; пропускаем делимитеры справа
-    i := origEnd
-    while (i > 0) {
-        ch := SubStr(pre, i, 1)
-        if IsDelimiterForWord(ch)
-            i -= 1
-        else
-            break
-    }
-    endPos := i
-    Log("ConvertWord endPos=" endPos)
-
-    if (endPos <= 0) {
-        SendEvent "{Right}"
-        Log("ConvertWord exit: endPos<=0 (only delimiters)")
-        RestoreClipboard(saved)
-        return
-    }
-
-    ; идём влево до делимитера
-    j := endPos
-    while (j > 0) {
-        ch := SubStr(pre, j, 1)
-        if IsDelimiterForWord(ch) {
-            j += 1
-            break
-        }
-        j -= 1
-    }
-    startPos := (j = 0) ? 1 : j
-
-    wordLen  := endPos - startPos + 1
-    skipTail := origEnd - endPos
-    Log("ConvertWord startPos=" startPos " wordLen=" wordLen " skipTail=" skipTail)
-
-    ; вернуть курсор в исходную позицию
-    SendEvent "{Right}"
-    Sleep 10
-
-    if (skipTail > 0) {
-        SendEvent "{Left " skipTail "}"
-        Sleep 10
-        Log("ConvertWord moved left by skipTail")
-    }
-
-    SendEvent "+{Left " wordLen "}"
-    Sleep 20
-    Log("ConvertWord selected word (by keys)")
-
-    marker2 := marker "_W"
-    A_Clipboard := marker2
-    SendEvent "^c"
-    if !ClipWait(0.6) {
-        Log("ConvertWord FAIL: ClipWait timeout (word)")
-        RestoreClipboard(saved)
-        return
-    }
-    if (A_Clipboard = marker2) {
-        Log("ConvertWord exit: marker2 unchanged (word selection failed)")
-        RestoreClipboard(saved)
-        return
-    }
-
-    sel := A_Clipboard
-    Log("ConvertWord copied word len=" StrLen(sel) " text='" ShortText(sel) "'")
-
-    if (sel = "") {
-        Log("ConvertWord exit: word empty")
-        RestoreClipboard(saved)
-        return
-    }
-
-    conv := ToggleLayout(sel)
-
-    if (conv = sel) {
-        Log("ConvertWord conv==sel (no changes)")
-        if (doSwitch) {
-            Log("ConvertWord doSwitch=1 -> SwitchLayout()")
-            SwitchLayout()
-        } else {
-            Log("ConvertWord doSwitch=0 -> skip SwitchLayout")
-        }
-        RestoreClipboard(saved)
-        return
-    }
-
-    A_Clipboard := conv
-    Sleep 20
-    SendEvent "^v"
-    Log("ConvertWord pasted")
-
-    if (doSwitch) {
-        Log("ConvertWord doSwitch=1 -> SwitchLayout()")
-        SwitchLayout()
-    } else {
-        Log("ConvertWord doSwitch=0 -> skip SwitchLayout")
-    }
-
-    SetTimer RestoreClipboard.Bind(saved), -150
-}
-
-ShortText(s, maxLen := 40) {
+ShortText(s, maxLen := 80) {
     s := StrReplace(s, "`r", "")
     s := StrReplace(s, "`n", "\n")
     return (StrLen(s) <= maxLen) ? s : (SubStr(s, 1, maxLen) "…")
 }
 
-; Делимитер для "слова":
-; - пробел/таб и т.п.
-; - любой символ, который НЕ буква/цифра/_
-; ВАЖНО: ',' и '.' считаем частью слова (чтобы конвертилось "как есть")
-IsDelimiterForWord(ch) {
-    if RegExMatch(ch, "^\s$")
-        return true
-    return !RegExMatch(ch, "^[\p{L}\p{N}_,\.]$")
+LogInit()
+
+; =========================
+; НАСТРОЙКИ
+; =========================
+global gSwitchAfterBreak      := true   ; Break/Pause -> строка слева от курсора
+global gSwitchAfterShiftBreak := true   ; Shift+Break -> выделение
+global gSwitchAfterCtrlBreak  := true   ; Ctrl+Break -> токен перед курсором
+
+global gSkipNextPause := false
+global gBusy := false
+global MyGui
+
+; Lang IDs (НЕ грузим раскладки, только ищем среди уже установленных)
+global LANGID_EN := 0x0409   ; English (US)
+global LANGID_RU := 0x0419   ; Russian
+global LANGID_PL := 0x0415   ; Polish (на всякий)
+
+; HKL handles (берём только из уже установленного списка)
+global gHKL_EN := 0
+global gHKL_RU := 0
+
+; =========================
+; ИНИЦИАЛИЗАЦИЯ
+; =========================
+InitKeyboardLayouts()  ; НЕ добавляет раскладки, только ищет
+InitUI()
+
+Log("InitUI done | SwitchAfterShift=" (gSwitchAfterShiftBreak ? 1 : 0)
+    " SwitchAfterCtrl=" (gSwitchAfterCtrlBreak ? 1 : 0))
+LogWin("AfterInitUI | ")
+
+; =========================
+; ТАБЛИЦЫ РАСКЛАДКИ
+; =========================
+; Верхний ряд с Shift:
+; !@#$%^&*()_+ <-> !"№;%:?*()_+
+global gRuKeys := "ё1234567890-=йцукенгшщзхъфывапролджэячсмитьбю."
+    . "Ё!" . Chr(34) . "№;%:?*()_+ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,"
+
+global gEnKeys := "``1234567890-=qwertyuiop[]asdfghjkl;'zxcvbnm,./"
+    . "~!@#$%^&*()_+QWERTYUIOP{}ASDFGHJKL:" . Chr(34) . "ZXCVBNM<>?"
+
+; =========================
+; HKL: ТОЛЬКО ПОИСК УЖЕ УСТАНОВЛЕННЫХ (БЕЗ LoadKeyboardLayoutW)
+; =========================
+FindHKLByLangId(langId) {
+    cnt := DllCall("user32\GetKeyboardLayoutList", "Int", 0, "Ptr", 0, "Int")
+    if (cnt <= 0)
+        return 0
+
+    buf := Buffer(A_PtrSize * cnt, 0)
+    DllCall("user32\GetKeyboardLayoutList", "Int", cnt, "Ptr", buf, "Int")
+
+    Loop cnt {
+        hkl := NumGet(buf, (A_Index - 1) * A_PtrSize, "Ptr")
+        if ((hkl & 0xFFFF) = langId)
+            return hkl
+    }
+    return 0
+}
+
+InitKeyboardLayouts() {
+    global LANGID_EN, LANGID_RU, gHKL_EN, gHKL_RU
+
+    Log("InitKeyboardLayouts enter | (no LoadKeyboardLayoutW, only GetKeyboardLayoutList)")
+
+    gHKL_EN := FindHKLByLangId(LANGID_EN)
+    gHKL_RU := FindHKLByLangId(LANGID_RU)
+
+    Log("InitKeyboardLayouts done | HKL_EN=" (gHKL_EN ? Format("0x{:X}", gHKL_EN) : "0")
+        " HKL_RU=" (gHKL_RU ? Format("0x{:X}", gHKL_RU) : "0"))
+}
+
+; =========================
+; ХОТКЕИ
+; =========================
+^CtrlBreak:: {
+    global gSkipNextPause, gSwitchAfterCtrlBreak, gBusy
+
+    if gBusy {
+        Log("HOTKEY ^CtrlBreak ignored: gBusy=1")
+        return
+    }
+
+    Log("HOTKEY ^CtrlBreak fired | doSwitch=" (gSwitchAfterCtrlBreak ? 1 : 0))
+    LogWin("HOTKEY ^CtrlBreak | ")
+
+    gSkipNextPause := true
+    SetTimer ClearSkipPause, -80
+
+    Convert("token", gSwitchAfterCtrlBreak)
+}
+
+*Pause:: {
+    global gSkipNextPause
+    global gSwitchAfterBreak, gSwitchAfterShiftBreak, gSwitchAfterCtrlBreak
+    global gBusy
+
+    Log("HOTKEY *Pause fired | skip=" (gSkipNextPause ? 1 : 0)
+        " Ctrl=" (GetKeyState("Ctrl", "P") ? 1 : 0)
+        " Shift=" (GetKeyState("Shift", "P") ? 1 : 0))
+    LogWin("HOTKEY *Pause | ")
+
+    if gBusy {
+        Log("HOTKEY *Pause ignored: gBusy=1")
+        return
+    }
+
+    if gSkipNextPause {
+        Log("HOTKEY *Pause exit: skipped by gSkipNextPause")
+        return
+    }
+
+    if GetKeyState("Ctrl", "P") {
+        Log("HOTKEY *Pause route -> token")
+        Convert("token", gSwitchAfterCtrlBreak)
+    } else if GetKeyState("Shift", "P") {
+        Log("HOTKEY *Pause route -> selection")
+        Convert("selection", gSwitchAfterShiftBreak)
+    } else {
+        Log("HOTKEY *Pause route -> line")
+        Convert("line", gSwitchAfterBreak)
+    }
+}
+
+ClearSkipPause() {
+    global gSkipNextPause
+    gSkipNextPause := false
+    Log("ClearSkipPause -> 0")
+}
+
+; =========================
+; ОСНОВНАЯ ЛОГИКА
+; =========================
+Convert(mode := "selection", doSwitch := true) {
+    global gBusy
+    Critical
+    gBusy := true
+
+    Log("Convert enter | mode=" mode " doSwitch=" (doSwitch ? 1 : 0))
+
+    try {
+        if (mode = "token") {
+            ConvertTokenBeforeCursor(doSwitch)
+            return
+        }
+
+        saved := ClipboardAll()
+        pasted := false
+        createdSelection := false
+
+        try {
+            if (mode = "line") {
+                SendEvent "+{Home}"
+                Sleep 15
+                SendEvent "+{Home}"
+                Sleep 25
+                createdSelection := true
+                Log("Convert line: selected from cursor to line start")
+            }
+
+            text := CopyCurrentSelection()
+            if (text = "") {
+                Log("Convert exit: copied text is empty -> no convert, no layout switch")
+                return
+            }
+
+            result := ConvertLayout(text)
+            Log("Convert copied='" ShortText(text) "' -> '" ShortText(result.text) "' | target=" result.target)
+
+            if (result.text != text) {
+                A_Clipboard := result.text
+                Sleep 20
+                SendEvent "^v"
+                pasted := true
+                Log("Convert pasted")
+                Sleep 40
+            } else {
+                Log("Convert no changes")
+            }
+
+            ApplyLayoutAfterConvert(doSwitch, result.target)
+
+        } catch as e {
+            Log("Convert ERROR | mode=" mode " | " e.Message)
+        } finally {
+            if createdSelection && !pasted {
+                CollapseSelectionToRight()
+                Log("Convert cleanup: collapsed selection to right")
+            }
+
+            RestoreClipboard(saved)
+            Log("Convert exit")
+        }
+    } finally {
+        gBusy := false
+        Log("Convert final | gBusy=0")
+    }
+}
+
+ConvertTokenBeforeCursor(doSwitch := true) {
+    Log("ConvertToken enter | doSwitch=" (doSwitch ? 1 : 0))
+
+    saved := ClipboardAll()
+    pasted := false
+    tempSelectionActive := false
+    tokenSelectionActive := false
+
+    try {
+        SendEvent "+{Home}"
+        Sleep 15
+        SendEvent "+{Home}"
+        Sleep 25
+        tempSelectionActive := true
+
+        pre := CopyCurrentSelection()
+        if (pre = "") {
+            Log("ConvertToken exit: marker unchanged or empty pre -> no convert, no layout switch")
+            return
+        }
+
+        Log("ConvertToken pre len=" StrLen(pre) " text='" ShortText(pre) "'")
+
+        CollapseSelectionToRight()
+        tempSelectionActive := false
+        Sleep 10
+
+        endPos := TrimRightWhitespacePos(pre)
+        if (endPos <= 0) {
+            Log("ConvertToken exit: only whitespace before cursor -> no convert, no layout switch")
+            return
+        }
+
+        startPos := FindTokenStart(pre, endPos)
+        tokenLen := endPos - startPos + 1
+        skipSpaces := StrLen(pre) - endPos
+
+        Log("ConvertToken startPos=" startPos " tokenLen=" tokenLen " skipSpaces=" skipSpaces)
+
+        if (skipSpaces > 0) {
+            SendEvent "{Left " skipSpaces "}"
+            Sleep 10
+            Log("ConvertToken moved left by skipSpaces")
+        }
+
+        SendEvent "+{Left " tokenLen "}"
+        Sleep 20
+        tokenSelectionActive := true
+        Log("ConvertToken selected token")
+
+        text := CopyCurrentSelection()
+        if (text = "") {
+            Log("ConvertToken exit: token copy failed / empty -> no convert, no layout switch")
+            return
+        }
+
+        result := ConvertLayout(text)
+        Log("ConvertToken copied='" ShortText(text) "' -> '" ShortText(result.text) "' | target=" result.target)
+
+        if (result.text != text) {
+            A_Clipboard := result.text
+            Sleep 20
+            SendEvent "^v"
+            pasted := true
+            Log("ConvertToken pasted")
+            Sleep 40
+        } else {
+            Log("ConvertToken no changes")
+        }
+
+        ApplyLayoutAfterConvert(doSwitch, result.target)
+
+    } catch as e {
+        Log("ConvertToken ERROR | " e.Message)
+    } finally {
+        if tempSelectionActive || (tokenSelectionActive && !pasted) {
+            CollapseSelectionToRight()
+            Log("ConvertToken cleanup: collapsed selection to right")
+        }
+
+        RestoreClipboard(saved)
+        Log("ConvertToken exit")
+    }
+}
+
+CopyCurrentSelection() {
+    marker := "#LS_MARKER_" A_TickCount "#"
+    A_Clipboard := marker
+    SendEvent "^c"
+
+    if !ClipWait(0.6) {
+        Log("CopyCurrentSelection FAIL: ClipWait timeout")
+        return ""
+    }
+
+    if (A_Clipboard = marker) {
+        Log("CopyCurrentSelection FAIL: clipboard marker unchanged")
+        return ""
+    }
+
+    ; Защита от случайного попадания маркера в текст
+    if InStr(A_Clipboard, "#LS_MARKER_") || InStr(A_Clipboard, "№ДЫ_ЬФКЛУК_") {
+        Log("CopyCurrentSelection FAIL: marker-like text detected -> '" ShortText(A_Clipboard) "'")
+        return ""
+    }
+
+    Log("CopyCurrentSelection OK | len=" StrLen(A_Clipboard) " text='" ShortText(A_Clipboard) "'")
+    return A_Clipboard
+}
+
+TrimRightWhitespacePos(text) {
+    i := StrLen(text)
+    while (i > 0) {
+        ch := SubStr(text, i, 1)
+        if RegExMatch(ch, "^\s$")
+            i -= 1
+        else
+            break
+    }
+    return i
+}
+
+FindTokenStart(text, endPos) {
+    i := endPos
+    while (i > 0) {
+        ch := SubStr(text, i, 1)
+        if RegExMatch(ch, "^\s$")
+            break
+        i -= 1
+    }
+    return i + 1
+}
+
+CollapseSelectionToRight() {
+    SendEvent "{Right}"
 }
 
 RestoreClipboard(savedClip) {
     A_Clipboard := savedClip
+    Log("RestoreClipboard done")
 }
 
 ; =========================
-; ПЕРЕКЛЮЧЕНИЕ РАСКЛАДКИ (ПРОСТО ALT+SHIFT)
+; ПРИМЕНЕНИЕ НУЖНОЙ РАСКЛАДКИ
 ; =========================
-SwitchLayout() {
-    ; Если в Windows не Alt+Shift — поменяй на свой хоткей.
-    ; Пример для Win+Space:
-    ; SendEvent "#{Space}"
-    Log("SwitchLayout: send Alt+Shift")
-    SendEvent "{Alt down}{Shift down}{Shift up}{Alt up}"
+ApplyLayoutAfterConvert(doSwitch, targetHint := "") {
+    Log("ApplyLayoutAfterConvert enter | doSwitch=" (doSwitch ? 1 : 0) " targetHint=" targetHint)
+
+    if !doSwitch {
+        Log("ApplyLayoutAfterConvert exit: doSwitch=0")
+        return
+    }
+
+    if (targetHint != "") {
+        if SwitchToLayout(targetHint) {
+            Log("ApplyLayoutAfterConvert success via targetHint=" targetHint)
+            return
+        } else {
+            Log("ApplyLayoutAfterConvert targetHint switch failed")
+        }
+    }
+
+    ToggleEnRuForActiveWindow()
+}
+
+SwitchToLayout(target) {
+    global gHKL_EN, gHKL_RU
+
+    hwnd := WinExist("A")
+    if !hwnd {
+        Log("SwitchToLayout FAIL: no active hwnd")
+        return false
+    }
+
+    targetHKL := 0
+    if (target = "ru")
+        targetHKL := gHKL_RU
+    else if (target = "en")
+        targetHKL := gHKL_EN
+    else {
+        Log("SwitchToLayout FAIL: unknown target=" target)
+        return false
+    }
+
+    ; ВАЖНО: если раскладка не установлена в Windows — HKL будет 0, и мы НИЧЕГО НЕ ДОБАВЛЯЕМ.
+    if !targetHKL {
+        Log("SwitchToLayout FAIL: targetHKL=0 for target=" target " (layout not installed?)")
+        return false
+    }
+
+    try {
+        Log("SwitchToLayout send | target=" target
+            " hwnd=" hwnd
+            " HKL=" Format("0x{:X}", targetHKL))
+
+        ; WM_INPUTLANGCHANGEREQUEST = 0x0050
+        SendMessage(0x0050, 0, targetHKL, , "ahk_id " hwnd)
+        Sleep 20
+
+        current := GetActiveWindowLang()
+        ok := (current = target)
+
+        Log("SwitchToLayout result | requested=" target " current=" current " ok=" (ok ? 1 : 0))
+        return ok
+    } catch as e {
+        Log("SwitchToLayout ERROR | target=" target " | " e.Message)
+        return false
+    }
+}
+
+ToggleEnRuForActiveWindow() {
+    current := GetActiveWindowLang()
+    Log("ToggleEnRuForActiveWindow | current=" current)
+
+    if (current = "ru")
+        return SwitchToLayout("en")
+
+    if (current = "en")
+        return SwitchToLayout("ru")
+
+    ; Если текущая раскладка другая (pl/unknown) — пробуем ru, если не вышло — en
+    if SwitchToLayout("ru")
+        return true
+
+    return SwitchToLayout("en")
+}
+
+GetActiveWindowLang() {
+    hwnd := WinExist("A")
+    if !hwnd {
+        Log("GetActiveWindowLang FAIL: no active hwnd")
+        return ""
+    }
+
+    try {
+        threadId := DllCall("user32\GetWindowThreadProcessId", "Ptr", hwnd, "UInt*", 0, "UInt")
+        if !threadId {
+            Log("GetActiveWindowLang FAIL: threadId=0")
+            return ""
+        }
+
+        hkl := DllCall("user32\GetKeyboardLayout", "UInt", threadId, "Ptr")
+        if !hkl {
+            Log("GetActiveWindowLang FAIL: hkl=0")
+            return ""
+        }
+
+        langId := hkl & 0xFFFF
+
+        if (langId = 0x0419)
+            return "ru"
+        if (langId = 0x0409)
+            return "en"
+        if (langId = 0x0415)
+            return "pl"
+
+        Log("GetActiveWindowLang -> unknown | langId=" Format("0x{:X}", langId))
+        return ""
+    } catch as e {
+        Log("GetActiveWindowLang ERROR | " e.Message)
+        return ""
+    }
 }
 
 ; =========================
-; КОНВЕРТАЦИЯ РАСКЛАДКИ (ПРОСТАЯ, БЕЗ "УМНЫХ" ЗАПЯТЫХ/ТОЧЕК)
+; КОНВЕРТАЦИЯ РАСКЛАДКИ
 ; =========================
-ToggleLayout(str) {
-    ; Если есть кириллица — считаем, что это "набрано в RU" и конвертим в EN
-    if RegExMatch(str, "[А-Яа-яЁё]")
-        return RuToEn(str)
+ConvertLayout(text) {
+    toRu := EnToRu(text)
+    toEn := RuToEn(text)
 
-    ; Если есть латиница — конвертим ВЕСЬ токен в RU (включая , . и т.п.)
-    if RegExMatch(str, "[A-Za-z]")
-        return EnToRu(str)
+    toRuChanges := CountChanges(text, toRu)
+    toEnChanges := CountChanges(text, toEn)
 
-    return str
+    latinCount := CountLatin(text)
+    cyrCount   := CountCyr(text)
+
+    Log("ConvertLayout analyze | text='" ShortText(text) "'"
+        " toRuChanges=" toRuChanges
+        " toEnChanges=" toEnChanges
+        " latin=" latinCount
+        " cyr=" cyrCount)
+
+    if (toRuChanges > toEnChanges)
+        return { text: toRu, target: "ru" }
+
+    if (toEnChanges > toRuChanges)
+        return { text: toEn, target: "en" }
+
+    if (toRuChanges = 0)
+        return { text: text, target: "" }
+
+    if (latinCount > cyrCount)
+        return { text: toRu, target: "ru" }
+
+    if (cyrCount > latinCount)
+        return { text: toEn, target: "en" }
+
+    return { text: text, target: "" }
 }
 
-; =========================
-; ТАБЛИЦЫ РАСКЛАДКИ (РУ ↔ EN) + РЕГИСТР + ЗНАКИ
-; =========================
-RuToEn(str) {
-    ru := "ёйцукенгшщзхъфывапролджэячсмитьбю."
-        . "ЁЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,"
+CountChanges(a, b) {
+    len := StrLen(a)
+    if (StrLen(b) < len)
+        len := StrLen(b)
 
-    en := "``qwertyuiop[]asdfghjkl;'zxcvbnm,./"
-        . "~QWERTYUIOP{}ASDFGHJKL:" . Chr(34) . "ZXCVBNM<>?"
-
-    return MapLayout(str, ru, en)
+    count := 0
+    Loop len {
+        if (SubStr(a, A_Index, 1) != SubStr(b, A_Index, 1))
+            count += 1
+    }
+    return count
 }
 
-EnToRu(str) {
-    ru := "ёйцукенгшщзхъфывапролджэячсмитьбю."
-        . "ЁЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,"
-
-    en := "``qwertyuiop[]asdfghjkl;'zxcvbnm,./"
-        . "~QWERTYUIOP{}ASDFGHJKL:" . Chr(34) . "ZXCVBNM<>?"
-
-    return MapLayout(str, en, ru)
+CountLatin(text) {
+    count := 0
+    for _, ch in StrSplit(text, "")
+        if RegExMatch(ch, "^[A-Za-z]$")
+            count += 1
+    return count
 }
 
-MapLayout(str, from, to) {
+CountCyr(text) {
+    count := 0
+    for _, ch in StrSplit(text, "")
+        if RegExMatch(ch, "^[А-Яа-яЁё]$")
+            count += 1
+    return count
+}
+
+RuToEn(text) {
+    global gRuKeys, gEnKeys
+    return MapLayout(text, gRuKeys, gEnKeys)
+}
+
+EnToRu(text) {
+    global gRuKeys, gEnKeys
+    return MapLayout(text, gEnKeys, gRuKeys)
+}
+
+MapLayout(text, fromChars, toChars) {
     out := ""
-    for _, ch in StrSplit(str, "") {
-        pos := InStr(from, ch, true) ; учитывать регистр
-        out .= (pos > 0) ? SubStr(to, pos, 1) : ch
+    for _, ch in StrSplit(text, "") {
+        pos := InStr(fromChars, ch, true)
+        out .= (pos > 0) ? SubStr(toChars, pos, 1) : ch
     }
     return out
 }
