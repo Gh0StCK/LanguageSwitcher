@@ -6,7 +6,7 @@
 ; =========================
 ; ЛОГИ
 ; =========================
-global LOG_ENABLED := true
+global LOG_ENABLED := false
 global LOG_FILE := A_ScriptDir "\LanguageSwitcher.log"
 
 NowStr() {
@@ -118,8 +118,8 @@ InitKeyboardLayouts() {
 ; =========================
 ; ХОТКЕИ
 ; =========================
-Pause::HandlePauseHotkey("line", gSwitchAfterBreak, "Pause")
-+Pause::HandlePauseHotkey("selection", gSwitchAfterShiftBreak, "+Pause")
+sc045::HandlePauseHotkey("line", gSwitchAfterBreak, "sc045")
++sc045::HandlePauseHotkey("selection", gSwitchAfterShiftBreak, "+sc045")
 ^sc045::HandlePauseHotkey("token", gSwitchAfterCtrlBreak, "^sc045")
 ^sc046::IgnoreCtrlScrollLock()
 ^CtrlBreak::HandlePauseHotkey("token", gSwitchAfterCtrlBreak, "^CtrlBreak")
