@@ -90,5 +90,7 @@ Tell me thanks. 😊
 - Скачать Language Switcher.exe (или Language Switcher_Main.ahk и LanguageSwitcher_UI.ahk, если хотите лично конвертировать файлы в exe)
 - Запустить Language Switcher.exe
 
+---
+
 UPD 29.03.2026
 - Исправление логики работы кода.
