@@ -6,7 +6,7 @@
 ; =========================
 ; ЛОГИ
 ; =========================
-global LOG_ENABLED := false
+global LOG_ENABLED := true
 global LOG_FILE := A_ScriptDir "\LanguageSwitcher.log"
 
 NowStr() {
@@ -48,8 +48,10 @@ global gSwitchAfterBreak      := true   ; Break/Pause -> строка слева
 global gSwitchAfterShiftBreak := true   ; Shift+Break -> выделение
 global gSwitchAfterCtrlBreak  := true   ; Ctrl+Break -> токен перед курсором
 
-global gSkipNextPause := false
 global gBusy := false
+global HOTKEY_DUPLICATE_WINDOW_MS := 120
+global gLastPauseHotkeyTick := 0
+global gLastPauseHotkeyName := ""
 global MyGui
 
 ; Lang IDs (НЕ грузим раскладки, только ищем среди уже установленных)
@@ -116,59 +118,59 @@ InitKeyboardLayouts() {
 ; =========================
 ; ХОТКЕИ
 ; =========================
-^CtrlBreak:: {
-    global gSkipNextPause, gSwitchAfterCtrlBreak, gBusy
+Pause::HandlePauseHotkey("line", gSwitchAfterBreak, "Pause")
++Pause::HandlePauseHotkey("selection", gSwitchAfterShiftBreak, "+Pause")
+^sc045::HandlePauseHotkey("token", gSwitchAfterCtrlBreak, "^sc045")
+^sc046::IgnoreCtrlScrollLock()
+^CtrlBreak::HandlePauseHotkey("token", gSwitchAfterCtrlBreak, "^CtrlBreak")
 
-    if gBusy {
-        Log("HOTKEY ^CtrlBreak ignored: gBusy=1")
-        return
-    }
-
-    Log("HOTKEY ^CtrlBreak fired | doSwitch=" (gSwitchAfterCtrlBreak ? 1 : 0))
-    LogWin("HOTKEY ^CtrlBreak | ")
-
-    gSkipNextPause := true
-    SetTimer ClearSkipPause, -80
-
-    Convert("token", gSwitchAfterCtrlBreak)
-}
-
-*Pause:: {
-    global gSkipNextPause
-    global gSwitchAfterBreak, gSwitchAfterShiftBreak, gSwitchAfterCtrlBreak
+HandlePauseHotkey(mode, doSwitch, hotkeyName) {
     global gBusy
 
-    Log("HOTKEY *Pause fired | skip=" (gSkipNextPause ? 1 : 0)
-        " Ctrl=" (GetKeyState("Ctrl", "P") ? 1 : 0)
-        " Shift=" (GetKeyState("Shift", "P") ? 1 : 0))
-    LogWin("HOTKEY *Pause | ")
+    Log("HOTKEY " hotkeyName " fired | mode=" mode " doSwitch=" (doSwitch ? 1 : 0))
+    LogWin("HOTKEY " hotkeyName " | ")
 
     if gBusy {
-        Log("HOTKEY *Pause ignored: gBusy=1")
+        Log("HOTKEY " hotkeyName " ignored: gBusy=1")
         return
     }
 
-    if gSkipNextPause {
-        Log("HOTKEY *Pause exit: skipped by gSkipNextPause")
+    if ShouldSkipPauseHotkey(hotkeyName) {
         return
     }
 
-    if GetKeyState("Ctrl", "P") {
-        Log("HOTKEY *Pause route -> token")
-        Convert("token", gSwitchAfterCtrlBreak)
-    } else if GetKeyState("Shift", "P") {
-        Log("HOTKEY *Pause route -> selection")
-        Convert("selection", gSwitchAfterShiftBreak)
-    } else {
-        Log("HOTKEY *Pause route -> line")
-        Convert("line", gSwitchAfterBreak)
-    }
+    RememberPauseHotkey(hotkeyName)
+    Convert(mode, doSwitch)
 }
 
-ClearSkipPause() {
-    global gSkipNextPause
-    gSkipNextPause := false
-    Log("ClearSkipPause -> 0")
+ShouldSkipPauseHotkey(hotkeyName) {
+    global HOTKEY_DUPLICATE_WINDOW_MS, gLastPauseHotkeyTick, gLastPauseHotkeyName
+
+    if ((A_TickCount - gLastPauseHotkeyTick) > HOTKEY_DUPLICATE_WINDOW_MS)
+        return false
+
+    if ((hotkeyName = "^CtrlBreak") && (gLastPauseHotkeyName = "^sc046")) {
+        Log("HOTKEY " hotkeyName " skipped: duplicate of ^sc046")
+        return true
+    }
+
+    if ((hotkeyName = "^sc045") && (gLastPauseHotkeyName = "^sc045")) {
+        Log("HOTKEY " hotkeyName " skipped: duplicate")
+        return true
+    }
+
+    return false
+}
+
+RememberPauseHotkey(hotkeyName) {
+    global gLastPauseHotkeyTick, gLastPauseHotkeyName
+    gLastPauseHotkeyTick := A_TickCount
+    gLastPauseHotkeyName := hotkeyName
+}
+
+IgnoreCtrlScrollLock() {
+    RememberPauseHotkey("^sc046")
+    Log("HOTKEY ^sc046 ignored: physical Ctrl+ScrollLock")
 }
 
 ; =========================
@@ -193,43 +195,17 @@ Convert(mode := "selection", doSwitch := true) {
 
         try {
             if (mode = "line") {
-                SendEvent "+{Home}"
-                Sleep 15
-                SendEvent "+{Home}"
-                Sleep 25
+                SelectToLineStart()
                 createdSelection := true
                 Log("Convert line: selected from cursor to line start")
             }
 
-            text := CopyCurrentSelection()
-            if (text = "") {
-                Log("Convert exit: copied text is empty -> no convert, no layout switch")
-                return
-            }
-
-            result := ConvertLayout(text)
-            Log("Convert copied='" ShortText(text) "' -> '" ShortText(result.text) "' | target=" result.target)
-
-            if (result.text != text) {
-                A_Clipboard := result.text
-                Sleep 20
-                SendEvent "^v"
-                pasted := true
-                Log("Convert pasted")
-                Sleep 40
-            } else {
-                Log("Convert no changes")
-            }
-
-            ApplyLayoutAfterConvert(doSwitch, result.target)
+            pasted := CopyAndConvertSelection(doSwitch, "Convert", "copied text is empty -> no convert, no layout switch")
 
         } catch as e {
             Log("Convert ERROR | mode=" mode " | " e.Message)
         } finally {
-            if createdSelection && !pasted {
-                CollapseSelectionToRight()
-                Log("Convert cleanup: collapsed selection to right")
-            }
+            CleanupSelection(createdSelection, pasted, "Convert")
 
             RestoreClipboard(saved)
             Log("Convert exit")
@@ -249,10 +225,7 @@ ConvertTokenBeforeCursor(doSwitch := true) {
     tokenSelectionActive := false
 
     try {
-        SendEvent "+{Home}"
-        Sleep 15
-        SendEvent "+{Home}"
-        Sleep 25
+        SelectToLineStart()
         tempSelectionActive := true
 
         pre := CopyCurrentSelection()
@@ -267,61 +240,64 @@ ConvertTokenBeforeCursor(doSwitch := true) {
         tempSelectionActive := false
         Sleep 10
 
-        endPos := TrimRightWhitespacePos(pre)
-        if (endPos <= 0) {
+        tokenInfo := GetTokenSelectionInfo(pre)
+        if !tokenInfo {
             Log("ConvertToken exit: only whitespace before cursor -> no convert, no layout switch")
             return
         }
 
-        startPos := FindTokenStart(pre, endPos)
-        tokenLen := endPos - startPos + 1
-        skipSpaces := StrLen(pre) - endPos
+        Log("ConvertToken startPos=" tokenInfo.startPos " tokenLen=" tokenInfo.tokenLen " skipSpaces=" tokenInfo.skipSpaces)
 
-        Log("ConvertToken startPos=" startPos " tokenLen=" tokenLen " skipSpaces=" skipSpaces)
-
-        if (skipSpaces > 0) {
-            SendEvent "{Left " skipSpaces "}"
-            Sleep 10
-            Log("ConvertToken moved left by skipSpaces")
-        }
-
-        SendEvent "+{Left " tokenLen "}"
-        Sleep 20
+        SelectTokenBeforeCursor(tokenInfo)
         tokenSelectionActive := true
         Log("ConvertToken selected token")
 
-        text := CopyCurrentSelection()
-        if (text = "") {
-            Log("ConvertToken exit: token copy failed / empty -> no convert, no layout switch")
-            return
-        }
-
-        result := ConvertLayout(text)
-        Log("ConvertToken copied='" ShortText(text) "' -> '" ShortText(result.text) "' | target=" result.target)
-
-        if (result.text != text) {
-            A_Clipboard := result.text
-            Sleep 20
-            SendEvent "^v"
-            pasted := true
-            Log("ConvertToken pasted")
-            Sleep 40
-        } else {
-            Log("ConvertToken no changes")
-        }
-
-        ApplyLayoutAfterConvert(doSwitch, result.target)
+        pasted := CopyAndConvertSelection(doSwitch, "ConvertToken", "token copy failed / empty -> no convert, no layout switch")
 
     } catch as e {
         Log("ConvertToken ERROR | " e.Message)
     } finally {
-        if tempSelectionActive || (tokenSelectionActive && !pasted) {
-            CollapseSelectionToRight()
-            Log("ConvertToken cleanup: collapsed selection to right")
-        }
+        CleanupSelection(tempSelectionActive || tokenSelectionActive, pasted, "ConvertToken")
 
         RestoreClipboard(saved)
         Log("ConvertToken exit")
+    }
+}
+
+CopyAndConvertSelection(doSwitch, logPrefix, emptyMessage) {
+    text := CopyCurrentSelection()
+    if (text = "") {
+        Log(logPrefix " exit: " emptyMessage)
+        return false
+    }
+
+    return ApplyConvertedText(text, doSwitch, logPrefix)
+}
+
+ApplyConvertedText(text, doSwitch, logPrefix) {
+    result := ConvertLayout(text)
+    Log(logPrefix " copied='" ShortText(text) "' -> '" ShortText(result.text) "' | target=" result.target)
+
+    if (result.text != text) {
+        A_Clipboard := result.text
+        Sleep 20
+        SendEvent "^v"
+        Log(logPrefix " pasted")
+        Sleep 40
+        pasted := true
+    } else {
+        Log(logPrefix " no changes")
+        pasted := false
+    }
+
+    ApplyLayoutAfterConvert(doSwitch, result.target)
+    return pasted
+}
+
+CleanupSelection(selectionActive, pasted, logPrefix) {
+    if selectionActive && !pasted {
+        CollapseSelectionToRight()
+        Log(logPrefix " cleanup: collapsed selection to right")
     }
 }
 
@@ -373,6 +349,38 @@ FindTokenStart(text, endPos) {
     return i + 1
 }
 
+GetTokenSelectionInfo(text) {
+    endPos := TrimRightWhitespacePos(text)
+    if (endPos <= 0)
+        return false
+
+    startPos := FindTokenStart(text, endPos)
+    return {
+        startPos: startPos,
+        tokenLen: endPos - startPos + 1,
+        skipSpaces: StrLen(text) - endPos
+    }
+}
+
+SelectTokenBeforeCursor(tokenInfo) {
+    if (tokenInfo.skipSpaces > 0) {
+        SendEvent "{Left " tokenInfo.skipSpaces "}"
+        Sleep 10
+        Log("ConvertToken moved left by skipSpaces")
+    }
+
+    SendEvent "+{Left " tokenInfo.tokenLen "}"
+    Sleep 20
+}
+
+SelectToLineStart() {
+    SendEvent "+{Home}"
+    Sleep 15
+    if !GetKeyState("Shift", "P")
+        SendEvent "{Shift up}"
+    Sleep 25
+}
+
 CollapseSelectionToRight() {
     SendEvent "{Right}"
 }
@@ -406,20 +414,14 @@ ApplyLayoutAfterConvert(doSwitch, targetHint := "") {
 }
 
 SwitchToLayout(target) {
-    global gHKL_EN, gHKL_RU
-
     hwnd := WinExist("A")
     if !hwnd {
         Log("SwitchToLayout FAIL: no active hwnd")
         return false
     }
 
-    targetHKL := 0
-    if (target = "ru")
-        targetHKL := gHKL_RU
-    else if (target = "en")
-        targetHKL := gHKL_EN
-    else {
+    targetHKL := GetTargetHKL(target)
+    if (targetHKL = "") {
         Log("SwitchToLayout FAIL: unknown target=" target)
         return false
     }
@@ -448,6 +450,16 @@ SwitchToLayout(target) {
         Log("SwitchToLayout ERROR | target=" target " | " e.Message)
         return false
     }
+}
+
+GetTargetHKL(target) {
+    global gHKL_EN, gHKL_RU
+
+    if (target = "ru")
+        return gHKL_RU
+    if (target = "en")
+        return gHKL_EN
+    return ""
 }
 
 ToggleEnRuForActiveWindow() {
@@ -488,13 +500,9 @@ GetActiveWindowLang() {
         }
 
         langId := hkl & 0xFFFF
-
-        if (langId = 0x0419)
-            return "ru"
-        if (langId = 0x0409)
-            return "en"
-        if (langId = 0x0415)
-            return "pl"
+        langName := ResolveLangName(langId)
+        if (langName != "")
+            return langName
 
         Log("GetActiveWindowLang -> unknown | langId=" Format("0x{:X}", langId))
         return ""
@@ -502,6 +510,16 @@ GetActiveWindowLang() {
         Log("GetActiveWindowLang ERROR | " e.Message)
         return ""
     }
+}
+
+ResolveLangName(langId) {
+    if (langId = 0x0419)
+        return "ru"
+    if (langId = 0x0409)
+        return "en"
+    if (langId = 0x0415)
+        return "pl"
+    return ""
 }
 
 ; =========================
@@ -514,8 +532,9 @@ ConvertLayout(text) {
     toRuChanges := CountChanges(text, toRu)
     toEnChanges := CountChanges(text, toEn)
 
-    latinCount := CountLatin(text)
-    cyrCount   := CountCyr(text)
+    letterStats := CountLetterTypes(text)
+    latinCount := letterStats.latin
+    cyrCount   := letterStats.cyr
 
     Log("ConvertLayout analyze | text='" ShortText(text) "'"
         " toRuChanges=" toRuChanges
@@ -554,20 +573,19 @@ CountChanges(a, b) {
     return count
 }
 
-CountLatin(text) {
-    count := 0
-    for _, ch in StrSplit(text, "")
-        if RegExMatch(ch, "^[A-Za-z]$")
-            count += 1
-    return count
-}
+CountLetterTypes(text) {
+    latinCount := 0
+    cyrCount := 0
 
-CountCyr(text) {
-    count := 0
-    for _, ch in StrSplit(text, "")
-        if RegExMatch(ch, "^[А-Яа-яЁё]$")
-            count += 1
-    return count
+    for _, ch in StrSplit(text, "") {
+        if RegExMatch(ch, "^[A-Za-z]$") {
+            latinCount += 1
+        } else if RegExMatch(ch, "^[\x{410}-\x{42F}\x{430}-\x{44F}\x{401}\x{451}]$") {
+            cyrCount += 1
+        }
+    }
+
+    return { latin: latinCount, cyr: cyrCount }
 }
 
 RuToEn(text) {
