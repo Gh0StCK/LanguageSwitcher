@@ -54,23 +54,14 @@ global gLastPauseHotkeyTick := 0
 global gLastPauseHotkeyName := ""
 global MyGui
 
-; Lang IDs (НЕ грузим раскладки, только ищем среди уже установленных)
-global LANGID_EN := 0x0409   ; English (US)
-global LANGID_RU := 0x0419   ; Russian
-global LANGID_PL := 0x0415   ; Polish (на всякий)
-
-; HKL handles (берём только из уже установленного списка)
-global gHKL_EN := 0
-global gHKL_RU := 0
-
 ; =========================
 ; ИНИЦИАЛИЗАЦИЯ
 ; =========================
-InitKeyboardLayouts()  ; НЕ добавляет раскладки, только ищет
 InitUI()
 
 Log("InitUI done | SwitchAfterShift=" (gSwitchAfterShiftBreak ? 1 : 0)
-    " SwitchAfterCtrl=" (gSwitchAfterCtrlBreak ? 1 : 0))
+    " SwitchAfterCtrl=" (gSwitchAfterCtrlBreak ? 1 : 0)
+    " SwitchMethod=AltShift")
 LogWin("AfterInitUI | ")
 
 ; =========================
@@ -83,37 +74,6 @@ global gRuKeys := "ё1234567890-=йцукенгшщзхъфывапролджэ�
 
 global gEnKeys := "``1234567890-=qwertyuiop[]asdfghjkl;'zxcvbnm,./"
     . "~!@#$%^&*()_+QWERTYUIOP{}ASDFGHJKL:" . Chr(34) . "ZXCVBNM<>?"
-
-; =========================
-; HKL: ТОЛЬКО ПОИСК УЖЕ УСТАНОВЛЕННЫХ (БЕЗ LoadKeyboardLayoutW)
-; =========================
-FindHKLByLangId(langId) {
-    cnt := DllCall("user32\GetKeyboardLayoutList", "Int", 0, "Ptr", 0, "Int")
-    if (cnt <= 0)
-        return 0
-
-    buf := Buffer(A_PtrSize * cnt, 0)
-    DllCall("user32\GetKeyboardLayoutList", "Int", cnt, "Ptr", buf, "Int")
-
-    Loop cnt {
-        hkl := NumGet(buf, (A_Index - 1) * A_PtrSize, "Ptr")
-        if ((hkl & 0xFFFF) = langId)
-            return hkl
-    }
-    return 0
-}
-
-InitKeyboardLayouts() {
-    global LANGID_EN, LANGID_RU, gHKL_EN, gHKL_RU
-
-    Log("InitKeyboardLayouts enter | (no LoadKeyboardLayoutW, only GetKeyboardLayoutList)")
-
-    gHKL_EN := FindHKLByLangId(LANGID_EN)
-    gHKL_RU := FindHKLByLangId(LANGID_RU)
-
-    Log("InitKeyboardLayouts done | HKL_EN=" (gHKL_EN ? Format("0x{:X}", gHKL_EN) : "0")
-        " HKL_RU=" (gHKL_RU ? Format("0x{:X}", gHKL_RU) : "0"))
-}
 
 ; =========================
 ; ХОТКЕИ
@@ -391,7 +351,7 @@ RestoreClipboard(savedClip) {
 }
 
 ; =========================
-; ПРИМЕНЕНИЕ НУЖНОЙ РАСКЛАДКИ
+; ПЕРЕКЛЮЧЕНИЕ РАСКЛАДКИ ЧЕРЕЗ ALT+SHIFT
 ; =========================
 ApplyLayoutAfterConvert(doSwitch, targetHint := "") {
     Log("ApplyLayoutAfterConvert enter | doSwitch=" (doSwitch ? 1 : 0) " targetHint=" targetHint)
@@ -401,125 +361,39 @@ ApplyLayoutAfterConvert(doSwitch, targetHint := "") {
         return
     }
 
-    if (targetHint != "") {
-        if SwitchToLayout(targetHint) {
-            Log("ApplyLayoutAfterConvert success via targetHint=" targetHint)
-            return
-        } else {
-            Log("ApplyLayoutAfterConvert targetHint switch failed")
-        }
-    }
-
-    ToggleEnRuForActiveWindow()
+    ToggleLayoutByAltShift()
 }
 
-SwitchToLayout(target) {
-    hwnd := WinExist("A")
-    if !hwnd {
-        Log("SwitchToLayout FAIL: no active hwnd")
-        return false
-    }
+ToggleLayoutByAltShift() {
+    Log("ToggleLayoutByAltShift enter")
 
-    targetHKL := GetTargetHKL(target)
-    if (targetHKL = "") {
-        Log("SwitchToLayout FAIL: unknown target=" target)
-        return false
-    }
+    WaitHotkeyModifiersReleased(250)
 
-    ; ВАЖНО: если раскладка не установлена в Windows — HKL будет 0, и мы НИЧЕГО НЕ ДОБАВЛЯЕМ.
-    if !targetHKL {
-        Log("SwitchToLayout FAIL: targetHKL=0 for target=" target " (layout not installed?)")
-        return false
-    }
+    SendEvent "{Alt down}"
+    Sleep 20
+    SendEvent "{Shift down}"
+    Sleep 30
+    SendEvent "{Shift up}"
+    Sleep 20
+    SendEvent "{Alt up}"
+    Sleep 60
 
-    try {
-        Log("SwitchToLayout send | target=" target
-            " hwnd=" hwnd
-            " HKL=" Format("0x{:X}", targetHKL))
-
-        ; WM_INPUTLANGCHANGEREQUEST = 0x0050
-        SendMessage(0x0050, 0, targetHKL, , "ahk_id " hwnd)
-        Sleep 20
-
-        current := GetActiveWindowLang()
-        ok := (current = target)
-
-        Log("SwitchToLayout result | requested=" target " current=" current " ok=" (ok ? 1 : 0))
-        return ok
-    } catch as e {
-        Log("SwitchToLayout ERROR | target=" target " | " e.Message)
-        return false
-    }
+    Log("ToggleLayoutByAltShift done")
+    return true
 }
 
-GetTargetHKL(target) {
-    global gHKL_EN, gHKL_RU
+WaitHotkeyModifiersReleased(timeoutMs := 250) {
+    start := A_TickCount
 
-    if (target = "ru")
-        return gHKL_RU
-    if (target = "en")
-        return gHKL_EN
-    return ""
-}
-
-ToggleEnRuForActiveWindow() {
-    current := GetActiveWindowLang()
-    Log("ToggleEnRuForActiveWindow | current=" current)
-
-    if (current = "ru")
-        return SwitchToLayout("en")
-
-    if (current = "en")
-        return SwitchToLayout("ru")
-
-    ; Если текущая раскладка другая (pl/unknown) — пробуем ru, если не вышло — en
-    if SwitchToLayout("ru")
-        return true
-
-    return SwitchToLayout("en")
-}
-
-GetActiveWindowLang() {
-    hwnd := WinExist("A")
-    if !hwnd {
-        Log("GetActiveWindowLang FAIL: no active hwnd")
-        return ""
+    while ((A_TickCount - start) < timeoutMs) {
+        if !GetKeyState("Ctrl", "P") && !GetKeyState("Shift", "P") && !GetKeyState("Alt", "P")
+            break
+        Sleep 10
     }
 
-    try {
-        threadId := DllCall("user32\GetWindowThreadProcessId", "Ptr", hwnd, "UInt*", 0, "UInt")
-        if !threadId {
-            Log("GetActiveWindowLang FAIL: threadId=0")
-            return ""
-        }
-
-        hkl := DllCall("user32\GetKeyboardLayout", "UInt", threadId, "Ptr")
-        if !hkl {
-            Log("GetActiveWindowLang FAIL: hkl=0")
-            return ""
-        }
-
-        langId := hkl & 0xFFFF
-        langName := ResolveLangName(langId)
-        if (langName != "")
-            return langName
-
-        Log("GetActiveWindowLang -> unknown | langId=" Format("0x{:X}", langId))
-        return ""
-    } catch as e {
-        Log("GetActiveWindowLang ERROR | " e.Message)
-        return ""
-    }
-}
-
-ResolveLangName(langId) {
-    if (langId = 0x0419)
-        return "ru"
-    if (langId = 0x0409)
-        return "en"
-    if (langId = 0x0415)
-        return "pl"
-    return ""
+    Log("WaitHotkeyModifiersReleased | Ctrl=" (GetKeyState("Ctrl", "P") ? 1 : 0)
+        " Shift=" (GetKeyState("Shift", "P") ? 1 : 0)
+        " Alt=" (GetKeyState("Alt", "P") ? 1 : 0))
 }
 
 ; =========================
